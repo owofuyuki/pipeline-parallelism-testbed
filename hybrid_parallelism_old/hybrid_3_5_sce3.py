@@ -1,20 +1,20 @@
+import argparse
+import math
 import os
 import threading
 import time
-import argparse
-import torchvision
-import torchvision.transforms as transforms
-import math
-from tqdm import tqdm
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch.distributed.autograd as dist_autograd
 import torch.distributed.rpc as rpc
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
+import torchvision
+import torchvision.transforms as transforms
 from torch.distributed.optim import DistributedOptimizer
 from torch.distributed.rpc import RRef
+from tqdm import tqdm
 
 n_epochs = 5
 batch_size = 256
@@ -259,6 +259,7 @@ class DistNet(nn.Module):
         ))
         '''
         
+        '''
         # Scenario 2: world_size = 5
         # 1    Cloud
         #        |
@@ -292,8 +293,8 @@ class DistNet(nn.Module):
                 kwargs=kwargs,
                 timeout=0
             ))
-        
         '''
+        
         # Scenario 3: world_size = 7
         # 1         Cloud
         #         /       \
@@ -327,7 +328,6 @@ class DistNet(nn.Module):
                 kwargs=kwargs,
                 timeout=0
             ))
-        '''
 
     def forward(self, xs):
         out_futures = []
@@ -349,6 +349,7 @@ class DistNet(nn.Module):
             out_futures.append(x3_fut)
         '''    
             
+        '''
         # Scenario 2
         def f1(a):  # worker1 -> worker3
             for x in iter(a.chunk(self.split, dim=0)):
@@ -374,8 +375,8 @@ class DistNet(nn.Module):
             x2_rref = self.p_rref[2].remote().forward(x1_rref)
             x3_fut = self.p_rref[3].rpc_async().forward(x2_rref)
             out_futures.append(x3_fut)
-            
         '''
+        
         # Scenario 3
         def f1(a):  # worker1 -> worker4
             for x in iter(a.chunk(self.split, dim=0)):
@@ -420,8 +421,7 @@ class DistNet(nn.Module):
         d, e = xs.chunk(2, dim=0)
         threading.Thread(target=f4(b)).start()
         threading.Thread(target=f5(c)).start()
-        '''
-            
+               
         return torch.cat(torch.futures.wait_all(out_futures))
 
     def parameter_rrefs(self):
@@ -502,7 +502,7 @@ def run_master(split, world_size):
 
 
 def run_worker(rank, world_size, num_split):
-    options = rpc.TensorPipeRpcBackendOptions(num_worker_threads=128, rpc_timeout=30000)
+    options = rpc.TensorPipeRpcBackendOptions(num_worker_threads=32, rpc_timeout=30000)
 
     if rank == 0:
         rpc.init_rpc(

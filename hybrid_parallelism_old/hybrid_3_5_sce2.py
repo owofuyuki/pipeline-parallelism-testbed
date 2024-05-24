@@ -226,6 +226,7 @@ class DistNet(nn.Module):
         self.world_size = world_size
         self.p_rref = []
         
+        '''
         # Scenario 1: world_size = 4
         # 1  Cloud
         #      |
@@ -256,8 +257,8 @@ class DistNet(nn.Module):
             kwargs=kwargs,
             timeout=0
         ))
-        
         '''
+        
         # Scenario 2: world_size = 5
         # 1    Cloud
         #        |
@@ -291,7 +292,6 @@ class DistNet(nn.Module):
                 kwargs=kwargs,
                 timeout=0
             ))
-        '''
         
         '''
         # Scenario 3: world_size = 7
@@ -332,6 +332,7 @@ class DistNet(nn.Module):
     def forward(self, xs):
         out_futures = []
 
+        '''
         # Scenario 1
         # worker1 -> worker2
         for x in iter(xs.chunk(self.split, dim=0)):
@@ -345,9 +346,9 @@ class DistNet(nn.Module):
             x1_rref = RRef(x)
             x2_rref = self.p_rref[1].remote().forward(x1_rref)
             x3_fut = self.p_rref[2].rpc_async().forward(x2_rref)
-            out_futures.append(x3_fut)  
+            out_futures.append(x3_fut)
+        '''    
             
-        '''
         # Scenario 2
         def f1(a):  # worker1 -> worker3
             for x in iter(a.chunk(self.split, dim=0)):
@@ -373,8 +374,7 @@ class DistNet(nn.Module):
             x2_rref = self.p_rref[2].remote().forward(x1_rref)
             x3_fut = self.p_rref[3].rpc_async().forward(x2_rref)
             out_futures.append(x3_fut)
-        '''
-        
+            
         '''
         # Scenario 3
         def f1(a):  # worker1 -> worker4
@@ -420,8 +420,8 @@ class DistNet(nn.Module):
         d, e = xs.chunk(2, dim=0)
         threading.Thread(target=f4(b)).start()
         threading.Thread(target=f5(c)).start()
-        '''     
-        
+        '''
+            
         return torch.cat(torch.futures.wait_all(out_futures))
 
     def parameter_rrefs(self):
@@ -502,7 +502,7 @@ def run_master(split, world_size):
 
 
 def run_worker(rank, world_size, num_split):
-    options = rpc.TensorPipeRpcBackendOptions(num_worker_threads=128, rpc_timeout=30000)
+    options = rpc.TensorPipeRpcBackendOptions(num_worker_threads=32, rpc_timeout=30000)
 
     if rank == 0:
         rpc.init_rpc(

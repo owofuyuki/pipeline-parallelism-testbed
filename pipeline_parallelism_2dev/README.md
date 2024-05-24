@@ -13,4 +13,4 @@ Trong đó các trường:
 
 Mô hình chạy:
 
-![image](https://github-production-user-asset-6210df.s3.amazonaws.com/95759699/325295167-d886ef0b-4648-4daa-9444-de7802a4dc0a.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20240425%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20240425T021316Z&X-Amz-Expires=300&X-Amz-Signature=afa4ce3ad544182bdb8fdee1759c38bd9b53fcaa90cf5b91c4ea06000a895186&X-Amz-SignedHeaders=host&actor_id=83150815&key_id=0&repo_id=570033267)
+![image](https://github.com/future-internet-lab/Pipeline-Parallelism-Testbed/assets/95759699/d886ef0b-4648-4daa-9444-de7802a4dc0a)
