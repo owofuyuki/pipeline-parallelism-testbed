@@ -4,7 +4,6 @@ import time
 import argparse
 import torchvision
 import torchvision.transforms as transforms
-import math
 from tqdm import tqdm
 
 import torch
@@ -20,10 +19,6 @@ n_epochs = 5
 batch_size = 256
 learning_rate = 0.01
 momentum = 0.5
-log_interval = 10
-
-nblocks = [6, 12, 24, 16]
-growth_rate = 12
 
 parser = argparse.ArgumentParser(
     description="Hybrid Parallelism RPC based training")
@@ -61,68 +56,70 @@ assert args.rank is not None, "Must provide rank argument."
 
 
 class Bottleneck(nn.Module):
-    def __init__(self, in_planes, growth_rate):
+    expansion = 4
+
+    def __init__(self, in_channels, out_channels, i_downsample=None, stride=1):
         super(Bottleneck, self).__init__()
-        self.bn1 = nn.BatchNorm2d(in_planes)
-        self.conv1 = nn.Conv2d(in_planes, 4 * growth_rate, kernel_size=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(4 * growth_rate)
-        self.conv2 = nn.Conv2d(4 * growth_rate, growth_rate, kernel_size=3, padding=1, bias=False)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+        self.batch_norm1 = nn.BatchNorm2d(out_channels)
+
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=stride, padding=1)
+        self.batch_norm2 = nn.BatchNorm2d(out_channels)
+
+        self.conv3 = nn.Conv2d(out_channels, out_channels * self.expansion, kernel_size=1, stride=1, padding=0)
+        self.batch_norm3 = nn.BatchNorm2d(out_channels * self.expansion)
+
+        self.i_downsample = i_downsample
+        self.stride = stride
+        self.relu = nn.ReLU()
 
     def forward(self, x):
-        out = self.conv1(F.relu(self.bn1(x)))
-        out = self.conv2(F.relu(self.bn2(out)))
-        out = torch.cat([out, x], 1)
-        return out
+        identity = x.clone()
+        x = self.relu(self.batch_norm1(self.conv1(x)))
+
+        x = self.relu(self.batch_norm2(self.conv2(x)))
+
+        x = self.conv3(x)
+        x = self.batch_norm3(x)
+
+        # downsample if needed
+        if self.i_downsample is not None:
+            identity = self.i_downsample(identity)
+        # add identity
+        x += identity
+        x = self.relu(x)
+
+        return x
 
 
-block = Bottleneck
-reduction = 0.5
-num_classes = 10
+def identity_layers(ResBlock, blocks, planes):
+    layers = []
 
+    for i in range(blocks - 1):
+        layers.append(ResBlock(planes * ResBlock.expansion, planes))
 
-class Transition(nn.Module):
-    def __init__(self, in_planes, out_planes):
-        super(Transition, self).__init__()
-        self.bn = nn.BatchNorm2d(in_planes)
-        self.conv = nn.Conv2d(in_planes, out_planes, kernel_size=1, bias=False)
-
-    def forward(self, x):
-        out = self.conv(F.relu(self.bn(x)))
-        out = F.avg_pool2d(out, 2)
-        return out
+    return nn.Sequential(*layers)
 
 
 class Shard1(nn.Module):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, num_channels=3):
         super(Shard1, self).__init__()
-
-        self.growth_rate = growth_rate
         self._lock = threading.Lock()
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {torch.cuda.get_device_name(self.device)}")
 
-        num_planes = 2*growth_rate
-
-        self.conv1 = nn.Conv2d(3, num_planes, kernel_size=3, padding=1, bias=False).to(self.device)
-
-        self.dense1 = self._make_dense_layers(block, num_planes, nblocks[0]).to(self.device)
-        num_planes += nblocks[0]*growth_rate
-        out_planes = int(math.floor(num_planes*reduction))
-        self.trans1 = Transition(num_planes, out_planes).to(self.device)
-
-    def _make_dense_layers(self, block, in_planes, nblock):
-        layers = []
-        for i in range(nblock):
-            layers.append(block(in_planes, self.growth_rate))
-            in_planes += self.growth_rate
-        return nn.Sequential(*layers)
+        self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=7, stride=2, padding=3, bias=False).to(self.device)
+        self.batch_norm1 = nn.BatchNorm2d(64).to(self.device)
+        self.relu = nn.ReLU().to(self.device)
+        self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1).to(self.device)
 
     def forward(self, x_rref):
         x = x_rref.to_here().to(self.device)
         with self._lock:
-            out = self.conv1(x)
-            out = self.trans1(self.dense1(out))
-        return out.cpu()
+            x = self.conv1(x)
+            x = self.batch_norm1(x)
+            x = self.relu(x)
+            x = self.max_pool(x)
+        return x.cpu()
 
     def parameter_rrefs(self):
         r"""
@@ -130,35 +127,43 @@ class Shard1(nn.Module):
         list of RRefs.
         """
         return [RRef(p) for p in self.parameters()]
+
 
 class Shard2(nn.Module):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, ResBlock=Bottleneck, layer_list=[3, 4, 6, 3], num_classes=10):
         super(Shard2, self).__init__()
-
-        self.growth_rate = growth_rate
         self._lock = threading.Lock()
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {torch.cuda.get_device_name(self.device)}")
 
-        num_planes = 4*growth_rate
-    
-        self.dense2 = self._make_dense_layers(block, num_planes, nblocks[1]).to(self.device)
-        num_planes += nblocks[1]*growth_rate
-        out_planes = int(math.floor(num_planes*reduction))
-        self.trans2 = Transition(num_planes, out_planes).to(self.device)
+        self.in_channels = 64
 
-    def _make_dense_layers(self, block, in_planes, nblock):
-        layers = []
-        for i in range(nblock):
-            layers.append(block(in_planes, self.growth_rate))
-            in_planes += self.growth_rate
-        return nn.Sequential(*layers)
+        self.layer1 = self._make_layer(ResBlock, planes=64).to(self.device)
+        self.layer2 = identity_layers(ResBlock, layer_list[0], planes=64).to(self.device)
+        self.layer3 = self._make_layer(ResBlock, planes=128, stride=2).to(self.device)
+        self.layer4 = identity_layers(ResBlock, layer_list[1], planes=128).to(self.device)
+        self.layer5 = self._make_layer(ResBlock, planes=256, stride=2).to(self.device)
+        self.layer6 = identity_layers(ResBlock, layer_list[2], planes=256).to(self.device)
+        self.layer7 = self._make_layer(ResBlock, planes=512, stride=2).to(self.device)
+        self.layer8 = identity_layers(ResBlock, layer_list[3], planes=512).to(self.device)
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1)).to(self.device)
+        self.fc = nn.Linear(512 * ResBlock.expansion, num_classes).to(self.device)
 
     def forward(self, x_rref):
         x = x_rref.to_here().to(self.device)
         with self._lock:
-            out = self.trans2(self.dense2(x))
-        return out.cpu()
+            x = self.layer1(x)
+            x = self.layer2(x)
+            x = self.layer3(x)
+            x = self.layer4(x)
+            x = self.layer5(x)
+            x = self.layer6(x)
+            x = self.layer7(x)
+            x = self.layer8(x)
+            x = self.avgpool(x)
+            x = x.reshape(x.shape[0], -1)
+            x = self.fc(x)
+        return x.cpu()
 
     def parameter_rrefs(self):
         r"""
@@ -167,52 +172,21 @@ class Shard2(nn.Module):
         """
         return [RRef(p) for p in self.parameters()]
 
-class Shard3(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super(Shard3, self).__init__()
-
-        self.growth_rate = growth_rate
-        self._lock = threading.Lock()
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {torch.cuda.get_device_name(self.device)}")
-
-        num_planes = 8*growth_rate
-    
-        self.dense3 = self._make_dense_layers(block, num_planes, nblocks[2]).to(self.device)
-        num_planes += nblocks[2]*growth_rate
-        out_planes = int(math.floor(num_planes*reduction))
-        self.trans3 = Transition(num_planes, out_planes).to(self.device)
-        num_planes = out_planes
-
-        self.dense4 = self._make_dense_layers(block, num_planes, nblocks[3]).to(self.device)
-        num_planes += nblocks[3]*growth_rate
-
-        self.bn = nn.BatchNorm2d(num_planes).to(self.device)
-        self.linear = nn.Linear(num_planes, num_classes).to(self.device)
-
-    def _make_dense_layers(self, block, in_planes, nblock):
+    def _make_layer(self, ResBlock, planes, stride=1):
+        ii_downsample = None
         layers = []
-        for i in range(nblock):
-            layers.append(block(in_planes, self.growth_rate))
-            in_planes += self.growth_rate
+
+        if stride != 1 or self.in_channels != planes * ResBlock.expansion:
+            ii_downsample = nn.Sequential(
+                nn.Conv2d(self.in_channels, planes * ResBlock.expansion, kernel_size=1, stride=stride),
+                nn.BatchNorm2d(planes * ResBlock.expansion)
+            )
+
+        layers.append(ResBlock(self.in_channels, planes, i_downsample=ii_downsample, stride=stride))
+        self.in_channels = planes * ResBlock.expansion
+
         return nn.Sequential(*layers)
 
-    def forward(self, x_rref):
-        x = x_rref.to_here().to(self.device)
-        with self._lock:
-            out = self.trans3(self.dense3(x))
-            out = self.dense4(out)
-            out = F.avg_pool2d(F.relu(self.bn(out)), 4)
-            out = out.view(out.size(0), -1)
-            out = self.linear(out)
-        return out.cpu()
-
-    def parameter_rrefs(self):
-        r"""
-        Create one RRef for each parameter in the given local module, and return a
-        list of RRefs.
-        """
-        return [RRef(p) for p in self.parameters()]
 
 class DistNet(nn.Module):
     """
@@ -225,7 +199,7 @@ class DistNet(nn.Module):
         self.split = split
         self.world_size = world_size
         self.p_rref = []
-        
+
         self.p_rref.append(rpc.remote(
             "worker1",
             Shard1,
@@ -233,7 +207,7 @@ class DistNet(nn.Module):
             kwargs=kwargs,
             timeout=0
         ))
-        
+
         self.p_rref.append(rpc.remote(
             "worker2",
             Shard2,
@@ -241,25 +215,15 @@ class DistNet(nn.Module):
             kwargs=kwargs,
             timeout=0
         ))
-        
-        self.p_rref.append(rpc.remote(
-            "worker3",
-            Shard3,
-            args=args,
-            kwargs=kwargs,
-            timeout=0
-        ))
 
     def forward(self, xs):
         out_futures = []
-
         for x in iter(xs.chunk(self.split, dim=0)):
             x1_rref = RRef(x)
             x2_rref = self.p_rref[0].remote().forward(x1_rref)
-            x3_rref = self.p_rref[1].remote().forward(x2_rref)
-            x4_fut = self.p_rref[2].rpc_async().forward(x3_rref)
-            out_futures.append(x4_fut)
-        
+            x3_fut = self.p_rref[1].rpc_async().forward(x2_rref)
+            out_futures.append(x3_fut)
+
         return torch.cat(torch.futures.wait_all(out_futures))
 
     def parameter_rrefs(self):
@@ -336,7 +300,7 @@ def run_master(split, world_size):
         train()
         time_stop = time.time()
         print(f"Epoch {epoch} training time: {time_stop - time_start} seconds\n")
-        test()
+        # test()
 
 
 def run_worker(rank, world_size, num_split):
@@ -368,4 +332,4 @@ if __name__ == "__main__":
     os.environ['MASTER_PORT'] = args.master_port
     os.environ['GLOO_SOCKET_IFNAME'] = args.interface
     os.environ["TP_SOCKET_IFNAME"] = args.interface
-    run_worker(rank=args.rank, world_size=4, num_split=args.split)
+    run_worker(rank=args.rank, world_size=3, num_split=args.split)

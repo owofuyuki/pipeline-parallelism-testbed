@@ -93,7 +93,7 @@ class Transition(nn.Module):
 
 
 class Shard1(nn.Module):
-    def __init__(self, *args, **kwargs):
+    def __init__(self):
         super(Shard1, self).__init__()
 
         self.growth_rate = growth_rate
@@ -101,14 +101,20 @@ class Shard1(nn.Module):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {torch.cuda.get_device_name(self.device)}")
 
-        num_planes = 2*growth_rate
+        num_planes = 2 * growth_rate
 
         self.conv1 = nn.Conv2d(3, num_planes, kernel_size=3, padding=1, bias=False).to(self.device)
 
         self.dense1 = self._make_dense_layers(block, num_planes, nblocks[0]).to(self.device)
-        num_planes += nblocks[0]*growth_rate
-        out_planes = int(math.floor(num_planes*reduction))
+        num_planes += nblocks[0] * growth_rate
+        out_planes = int(math.floor(num_planes * reduction))
         self.trans1 = Transition(num_planes, out_planes).to(self.device)
+        num_planes = out_planes
+
+        self.dense2 = self._make_dense_layers(block, num_planes, nblocks[1]).to(self.device)
+        num_planes += nblocks[1] * growth_rate
+        out_planes = int(math.floor(num_planes * reduction))
+        self.trans2 = Transition(num_planes, out_planes).to(self.device)
 
     def _make_dense_layers(self, block, in_planes, nblock):
         layers = []
@@ -122,6 +128,7 @@ class Shard1(nn.Module):
         with self._lock:
             out = self.conv1(x)
             out = self.trans1(self.dense1(out))
+            out = self.trans2(self.dense2(out))
         return out.cpu()
 
     def parameter_rrefs(self):
@@ -131,8 +138,9 @@ class Shard1(nn.Module):
         """
         return [RRef(p) for p in self.parameters()]
 
+
 class Shard2(nn.Module):
-    def __init__(self, *args, **kwargs):
+    def __init__(self):
         super(Shard2, self).__init__()
 
         self.growth_rate = growth_rate
@@ -140,52 +148,16 @@ class Shard2(nn.Module):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {torch.cuda.get_device_name(self.device)}")
 
-        num_planes = 4*growth_rate
-    
-        self.dense2 = self._make_dense_layers(block, num_planes, nblocks[1]).to(self.device)
-        num_planes += nblocks[1]*growth_rate
-        out_planes = int(math.floor(num_planes*reduction))
-        self.trans2 = Transition(num_planes, out_planes).to(self.device)
+        num_planes = 8 * growth_rate
 
-    def _make_dense_layers(self, block, in_planes, nblock):
-        layers = []
-        for i in range(nblock):
-            layers.append(block(in_planes, self.growth_rate))
-            in_planes += self.growth_rate
-        return nn.Sequential(*layers)
-
-    def forward(self, x_rref):
-        x = x_rref.to_here().to(self.device)
-        with self._lock:
-            out = self.trans2(self.dense2(x))
-        return out.cpu()
-
-    def parameter_rrefs(self):
-        r"""
-        Create one RRef for each parameter in the given local module, and return a
-        list of RRefs.
-        """
-        return [RRef(p) for p in self.parameters()]
-
-class Shard3(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super(Shard3, self).__init__()
-
-        self.growth_rate = growth_rate
-        self._lock = threading.Lock()
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {torch.cuda.get_device_name(self.device)}")
-
-        num_planes = 8*growth_rate
-    
         self.dense3 = self._make_dense_layers(block, num_planes, nblocks[2]).to(self.device)
-        num_planes += nblocks[2]*growth_rate
-        out_planes = int(math.floor(num_planes*reduction))
+        num_planes += nblocks[2] * growth_rate
+        out_planes = int(math.floor(num_planes * reduction))
         self.trans3 = Transition(num_planes, out_planes).to(self.device)
         num_planes = out_planes
 
         self.dense4 = self._make_dense_layers(block, num_planes, nblocks[3]).to(self.device)
-        num_planes += nblocks[3]*growth_rate
+        num_planes += nblocks[3] * growth_rate
 
         self.bn = nn.BatchNorm2d(num_planes).to(self.device)
         self.linear = nn.Linear(num_planes, num_classes).to(self.device)
@@ -214,6 +186,7 @@ class Shard3(nn.Module):
         """
         return [RRef(p) for p in self.parameters()]
 
+
 class DistNet(nn.Module):
     """
     Assemble two parts as an nn.Module and define pipelining logic
@@ -225,7 +198,7 @@ class DistNet(nn.Module):
         self.split = split
         self.world_size = world_size
         self.p_rref = []
-        
+
         self.p_rref.append(rpc.remote(
             "worker1",
             Shard1,
@@ -233,7 +206,7 @@ class DistNet(nn.Module):
             kwargs=kwargs,
             timeout=0
         ))
-        
+
         self.p_rref.append(rpc.remote(
             "worker2",
             Shard2,
@@ -241,25 +214,15 @@ class DistNet(nn.Module):
             kwargs=kwargs,
             timeout=0
         ))
-        
-        self.p_rref.append(rpc.remote(
-            "worker3",
-            Shard3,
-            args=args,
-            kwargs=kwargs,
-            timeout=0
-        ))
 
     def forward(self, xs):
         out_futures = []
-
         for x in iter(xs.chunk(self.split, dim=0)):
             x1_rref = RRef(x)
             x2_rref = self.p_rref[0].remote().forward(x1_rref)
-            x3_rref = self.p_rref[1].remote().forward(x2_rref)
-            x4_fut = self.p_rref[2].rpc_async().forward(x3_rref)
-            out_futures.append(x4_fut)
-        
+            x3_fut = self.p_rref[1].rpc_async().forward(x2_rref)
+            out_futures.append(x3_fut)
+
         return torch.cat(torch.futures.wait_all(out_futures))
 
     def parameter_rrefs(self):
@@ -368,4 +331,4 @@ if __name__ == "__main__":
     os.environ['MASTER_PORT'] = args.master_port
     os.environ['GLOO_SOCKET_IFNAME'] = args.interface
     os.environ["TP_SOCKET_IFNAME"] = args.interface
-    run_worker(rank=args.rank, world_size=4, num_split=args.split)
+    run_worker(rank=args.rank, world_size=3, num_split=args.split)
