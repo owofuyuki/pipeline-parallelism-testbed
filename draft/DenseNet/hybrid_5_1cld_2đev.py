@@ -199,6 +199,7 @@ class DistNet(nn.Module):
         self.world_size = world_size
         self.p_rref = []
 
+        # dev
         for i in range(1, self.world_size - 1):
             self.p_rref.append(rpc.remote(
                 f"worker{i}",
@@ -208,6 +209,7 @@ class DistNet(nn.Module):
                 timeout=0
             ))
 
+        # edge
         self.p_rref.append(rpc.remote(
             "worker3",
             Shard2,

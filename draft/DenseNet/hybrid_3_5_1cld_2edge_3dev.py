@@ -227,78 +227,51 @@ class DistNet(nn.Module):
         self.p_rref = []
         
         for i in range(1, self.world_size - 3):
-            self.p_rref.append(rpc.remote(
-                f"worker{i}",
-                Shard1,
-                args=args,
-                kwargs=kwargs,
-                timeout=0
-            ))
-        
+            self.p_rref.append(
+                rpc.remote(f"worker{i}", Shard1, args=args, kwargs=kwargs, timeout=0)
+            )
+
         for i in range(self.world_size - 3, self.world_size - 1):
-            self.p_rref.append(rpc.remote(
-                f"worker{i}",
-                Shard2,
-                args=args,
-                kwargs=kwargs,
-                timeout=0
-            ))
-            
+            self.p_rref.append(
+                rpc.remote(f"worker{i}", Shard2, args=args, kwargs=kwargs, timeout=0)
+            )
+
         for i in range(self.world_size - 1, self.world_size):
-            self.p_rref.append(rpc.remote(
-                f"worker{i}",
-                Shard3,
-                args=args,
-                kwargs=kwargs,
-                timeout=0
-            ))
+            self.p_rref.append(
+                rpc.remote(f"worker{i}", Shard3, args=args, kwargs=kwargs, timeout=0)
+            )
 
     def forward(self, xs):
         out_futures = []
 
-        def f1(a):  # worker1 -> worker4
+        def f1(a):  # worker1 -> worker4 -> worker6
             for x in iter(a.chunk(self.split, dim=0)):
                 x1_rref = RRef(x)
                 x2_rref = self.p_rref[0].remote().forward(x1_rref)
-                x3_fut = self.p_rref[3].rpc_async().forward(x2_rref)
-                out_futures.append(x3_fut)
+                x3_rref = self.p_rref[3].remote().forward(x2_rref)
+                x4_fut = self.p_rref[5].rpc_async().forward(x3_rref)
+                out_futures.append(x4_fut)
 
-        def f2(a):  # worker2 -> worker4
+        def f2(a):  # worker2 -> worker5 -> worker6
             for x in iter(a.chunk(self.split, dim=0)):
                 x1_rref = RRef(x)
                 x2_rref = self.p_rref[1].remote().forward(x1_rref)
-                x3_fut = self.p_rref[3].rpc_async().forward(x2_rref)
-                out_futures.append(x3_fut)
+                x3_rref = self.p_rref[4].remote().forward(x2_rref)
+                x4_fut = self.p_rref[5].rpc_async().forward(x3_rref)
+                out_futures.append(x4_fut)
          
-        def f3(a):  # worker3 -> worker5
+        def f3(a):  # worker3 -> worker5 -> worker6
             for x in iter(a.chunk(self.split, dim=0)):
                 x1_rref = RRef(x)
                 x2_rref = self.p_rref[2].remote().forward(x1_rref)
-                x3_fut = self.p_rref[4].rpc_async().forward(x2_rref)
-                out_futures.append(x3_fut)
-        
-        def f4(a):  # worker4 -> worker6
-            for x in iter(a.chunk(self.split, dim=0)):
-                x1_rref = RRef(x)
-                x2_rref = self.p_rref[3].remote().forward(x1_rref)
-                x3_fut = self.p_rref[5].rpc_async().forward(x2_rref)
-                out_futures.append(x3_fut)
-                
-        def f5(a):  # worker5 -> worker6
-            for x in iter(a.chunk(self.split, dim=0)):
-                x1_rref = RRef(x)
-                x2_rref = self.p_rref[4].remote().forward(x1_rref)
-                x3_fut = self.p_rref[5].rpc_async().forward(x2_rref)
-                out_futures.append(x3_fut)
+                x3_rref = self.p_rref[4].remote().forward(x2_rref)
+                x4_fut = self.p_rref[5].rpc_async().forward(x3_rref)
+                out_futures.append(x4_fut)
         
         a, b, c = xs.chunk(3, dim=0)
         threading.Thread(target=f1(a)).start()
         threading.Thread(target=f2(b)).start()
         threading.Thread(target=f3(c)).start()
-        
-        d, e = xs.chunk(2, dim=0)
-        threading.Thread(target=f4(b)).start()
-        threading.Thread(target=f5(c)).start()
                
         return torch.cat(torch.futures.wait_all(out_futures))
 
@@ -408,4 +381,4 @@ if __name__ == "__main__":
     os.environ['MASTER_PORT'] = args.master_port
     os.environ['GLOO_SOCKET_IFNAME'] = args.interface
     os.environ["TP_SOCKET_IFNAME"] = args.interface
-    run_worker(rank=args.rank, world_size=4, num_split=args.split)
+    run_worker(rank=args.rank, world_size=7, num_split=args.split)
