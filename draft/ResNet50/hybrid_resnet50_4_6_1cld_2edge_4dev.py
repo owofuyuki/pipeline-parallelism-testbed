@@ -100,7 +100,7 @@ def identity_layers(ResBlock, blocks, planes):
 
 
 class Shard1(nn.Module):
-    def __init__(self, ResBlock=Bottleneck, layer_list=[3, 4, 6, 3], num_channels=3):
+    def __init__(self, ResBlock=Bottleneck, num_channels=3):
         super(Shard1, self).__init__()
         self._lock = threading.Lock()
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -110,11 +110,6 @@ class Shard1(nn.Module):
         self.relu = nn.ReLU().to(self.device)
         self.max_pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1).to(self.device)
 
-        self.in_channels = 64
-
-        self.layer1 = self._make_layer(ResBlock, planes=64).to(self.device)
-        self.layer2 = identity_layers(ResBlock, layer_list[0], planes=64).to(self.device)
-
     def forward(self, x_rref):
         x = x_rref.to_here().to(self.device)
         with self._lock:
@@ -122,9 +117,6 @@ class Shard1(nn.Module):
             x = self.batch_norm1(x)
             x = self.relu(x)
             x = self.max_pool(x)
-
-            x = self.layer1(x)
-            x = self.layer2(x)
         return x.cpu()
 
     def parameter_rrefs(self):
@@ -151,6 +143,46 @@ class Shard1(nn.Module):
 
 
 class Shard2(nn.Module):
+    def __init__(self, ResBlock=Bottleneck, layer_list=[3, 4, 6, 3], num_classes=10):
+        super(Shard2, self).__init__()
+        self._lock = threading.Lock()
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        
+        self.in_channels = 64
+
+        self.layer1 = self._make_layer(ResBlock, planes=64).to(self.device)
+        self.layer2 = identity_layers(ResBlock, layer_list[0], planes=64).to(self.device)
+
+    def forward(self, x_rref):
+        x = x_rref.to_here().to(self.device)
+        with self._lock:
+            x = self.layer1(x)
+            x = self.layer2(x)
+        return x.cpu()
+
+    def parameter_rrefs(self):
+        r"""
+        Create one RRef for each parameter in the given local module, and return a
+        list of RRefs.
+        """
+        return [RRef(p) for p in self.parameters()]
+
+    def _make_layer(self, ResBlock, planes, stride=1):
+        ii_downsample = None
+        layers = []
+
+        if stride != 1 or self.in_channels != planes * ResBlock.expansion:
+            ii_downsample = nn.Sequential(
+                nn.Conv2d(self.in_channels, planes * ResBlock.expansion, kernel_size=1, stride=stride),
+                nn.BatchNorm2d(planes * ResBlock.expansion)
+            )
+
+        layers.append(ResBlock(self.in_channels, planes, i_downsample=ii_downsample, stride=stride))
+        self.in_channels = planes * ResBlock.expansion
+
+        return nn.Sequential(*layers)
+    
+class Shard3(nn.Module):
     def __init__(self, ResBlock=Bottleneck, layer_list=[3, 4, 6, 3], num_classes=10):
         super(Shard2, self).__init__()
         self._lock = threading.Lock()
@@ -204,7 +236,6 @@ class Shard2(nn.Module):
 
         return nn.Sequential(*layers)
 
-
 class DistNet(nn.Module):
     """
     Assemble two parts as an nn.Module and define pipelining logic
@@ -216,31 +247,63 @@ class DistNet(nn.Module):
         self.split = split
         self.world_size = world_size
         self.p_rref = []
+        
+        for i in range(1, self.world_size - 3):
+            self.p_rref.append(
+                rpc.remote(f"worker{i}", Shard1, args=args, kwargs=kwargs, timeout=0)
+            )
 
-        self.p_rref.append(rpc.remote(
-            "worker1",
-            Shard1,
-            args=args,
-            kwargs=kwargs,
-            timeout=0
-        ))
+        for i in range(self.world_size - 3, self.world_size - 1):
+            self.p_rref.append(
+                rpc.remote(f"worker{i}", Shard2, args=args, kwargs=kwargs, timeout=0)
+            )
 
-        self.p_rref.append(rpc.remote(
-            "worker2",
-            Shard2,
-            args=args,
-            kwargs=kwargs,
-            timeout=0
-        ))
+        for i in range(self.world_size - 1, self.world_size):
+            self.p_rref.append(
+                rpc.remote(f"worker{i}", Shard3, args=args, kwargs=kwargs, timeout=0)
+            )
 
     def forward(self, xs):
         out_futures = []
-        for x in iter(xs.chunk(self.split, dim=0)):
-            x1_rref = RRef(x)
-            x2_rref = self.p_rref[0].remote().forward(x1_rref)
-            x3_fut = self.p_rref[1].rpc_async().forward(x2_rref)
-            out_futures.append(x3_fut)
 
+        def f1(a):  # worker1 -> worker5 -> worker7
+            for x in iter(a.chunk(self.split, dim=0)):
+                x1_rref = RRef(x)
+                x2_rref = self.p_rref[0].remote().forward(x1_rref)
+                x3_rref = self.p_rref[4].remote().forward(x2_rref)
+                x4_fut = self.p_rref[6].rpc_async().forward(x3_rref)
+                out_futures.append(x4_fut)
+
+        def f2(a):  # worker2 -> worker5 -> worker7
+            for x in iter(a.chunk(self.split, dim=0)):
+                x1_rref = RRef(x)
+                x2_rref = self.p_rref[1].remote().forward(x1_rref)
+                x3_rref = self.p_rref[4].remote().forward(x2_rref)
+                x4_fut = self.p_rref[6].rpc_async().forward(x3_rref)
+                out_futures.append(x4_fut)
+         
+        def f3(a):  # worker3 -> worker6 -> worker7
+            for x in iter(a.chunk(self.split, dim=0)):
+                x1_rref = RRef(x)
+                x2_rref = self.p_rref[2].remote().forward(x1_rref)
+                x3_rref = self.p_rref[5].remote().forward(x2_rref)
+                x4_fut = self.p_rref[6].rpc_async().forward(x3_rref)
+                out_futures.append(x4_fut)
+                
+        def f4(a):  # worker4 -> worker6 -> worker7
+            for x in iter(a.chunk(self.split, dim=0)):
+                x1_rref = RRef(x)
+                x2_rref = self.p_rref[3].remote().forward(x1_rref)
+                x3_rref = self.p_rref[5].remote().forward(x2_rref)
+                x4_fut = self.p_rref[6].rpc_async().forward(x3_rref)
+                out_futures.append(x4_fut)
+        
+        a, b, c, d = xs.chunk(4, dim=0)
+        threading.Thread(target=f1(a)).start()
+        threading.Thread(target=f2(b)).start()
+        threading.Thread(target=f3(c)).start()
+        threading.Thread(target=f4(d)).start()
+               
         return torch.cat(torch.futures.wait_all(out_futures))
 
     def parameter_rrefs(self):
@@ -317,7 +380,7 @@ def run_master(split, world_size):
         train()
         time_stop = time.time()
         print(f"Epoch {epoch} training time: {time_stop - time_start} seconds\n")
-        # test()
+        test()
 
 
 def run_worker(rank, world_size, num_split):
@@ -349,4 +412,4 @@ if __name__ == "__main__":
     os.environ['MASTER_PORT'] = args.master_port
     os.environ['GLOO_SOCKET_IFNAME'] = args.interface
     os.environ["TP_SOCKET_IFNAME"] = args.interface
-    run_worker(rank=args.rank, world_size=3, num_split=args.split)
+    run_worker(rank=args.rank, world_size=8, num_split=args.split)

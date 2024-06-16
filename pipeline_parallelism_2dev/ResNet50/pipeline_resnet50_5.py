@@ -100,7 +100,7 @@ def identity_layers(ResBlock, blocks, planes):
 
 
 class Shard1(nn.Module):
-    def __init__(self, ResBlock=Bottleneck, layer_list=[3, 4, 6, 3], num_channels=3):
+    def __init__(self, ResBlock=Bottleneck, num_channels=3):
         super(Shard1, self).__init__()
         self._lock = threading.Lock()
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -113,7 +113,6 @@ class Shard1(nn.Module):
         self.in_channels = 64
 
         self.layer1 = self._make_layer(ResBlock, planes=64).to(self.device)
-        self.layer2 = identity_layers(ResBlock, layer_list[0], planes=64).to(self.device)
 
     def forward(self, x_rref):
         x = x_rref.to_here().to(self.device)
@@ -124,7 +123,6 @@ class Shard1(nn.Module):
             x = self.max_pool(x)
 
             x = self.layer1(x)
-            x = self.layer2(x)
         return x.cpu()
 
     def parameter_rrefs(self):
@@ -158,6 +156,7 @@ class Shard2(nn.Module):
 
         self.in_channels = 256
 
+        self.layer2 = identity_layers(ResBlock, layer_list[0], planes=64).to(self.device)
         self.layer3 = self._make_layer(ResBlock, planes=128, stride=2).to(self.device)
         self.layer4 = identity_layers(ResBlock, layer_list[1], planes=128).to(self.device)
         self.layer5 = self._make_layer(ResBlock, planes=256, stride=2).to(self.device)
@@ -171,6 +170,7 @@ class Shard2(nn.Module):
     def forward(self, x_rref):
         x = x_rref.to_here().to(self.device)
         with self._lock:
+            x = self.layer2(x)
             x = self.layer3(x)
             x = self.layer4(x)
             x = self.layer5(x)

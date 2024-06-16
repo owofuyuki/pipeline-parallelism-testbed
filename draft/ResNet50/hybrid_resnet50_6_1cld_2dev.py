@@ -217,16 +217,19 @@ class DistNet(nn.Module):
         self.world_size = world_size
         self.p_rref = []
 
-        self.p_rref.append(rpc.remote(
-            "worker1",
-            Shard1,
-            args=args,
-            kwargs=kwargs,
-            timeout=0
-        ))
+        # dev
+        for i in range(1, self.world_size - 1):
+            self.p_rref.append(rpc.remote(
+                f"worker{i}",
+                Shard1,
+                args=args,
+                kwargs=kwargs,
+                timeout=0
+            ))
 
+        # edge
         self.p_rref.append(rpc.remote(
-            "worker2",
+            "worker3",
             Shard2,
             args=args,
             kwargs=kwargs,
@@ -235,12 +238,24 @@ class DistNet(nn.Module):
 
     def forward(self, xs):
         out_futures = []
-        for x in iter(xs.chunk(self.split, dim=0)):
-            x1_rref = RRef(x)
-            x2_rref = self.p_rref[0].remote().forward(x1_rref)
-            x3_fut = self.p_rref[1].rpc_async().forward(x2_rref)
-            out_futures.append(x3_fut)
 
+        def f1(a):
+            for x in iter(a.chunk(self.split, dim=0)):
+                x1_rref = RRef(x)
+                x2_rref = self.p_rref[0].remote().forward(x1_rref)
+                x3_fut = self.p_rref[2].rpc_async().forward(x2_rref)
+                out_futures.append(x3_fut)
+
+        def f2(a):
+            for x in iter(a.chunk(self.split, dim=0)):
+                x1_rref = RRef(x)
+                x2_rref = self.p_rref[1].remote().forward(x1_rref)
+                x3_fut = self.p_rref[2].rpc_async().forward(x2_rref)
+                out_futures.append(x3_fut)
+
+        a, b = xs.chunk(2, dim=0)
+        threading.Thread(target=f1(a)).start()
+        threading.Thread(target=f2(b)).start()
         return torch.cat(torch.futures.wait_all(out_futures))
 
     def parameter_rrefs(self):
@@ -317,7 +332,7 @@ def run_master(split, world_size):
         train()
         time_stop = time.time()
         print(f"Epoch {epoch} training time: {time_stop - time_start} seconds\n")
-        # test()
+        test()
 
 
 def run_worker(rank, world_size, num_split):
@@ -349,4 +364,4 @@ if __name__ == "__main__":
     os.environ['MASTER_PORT'] = args.master_port
     os.environ['GLOO_SOCKET_IFNAME'] = args.interface
     os.environ["TP_SOCKET_IFNAME"] = args.interface
-    run_worker(rank=args.rank, world_size=3, num_split=args.split)
+    run_worker(rank=args.rank, world_size=4, num_split=args.split)
