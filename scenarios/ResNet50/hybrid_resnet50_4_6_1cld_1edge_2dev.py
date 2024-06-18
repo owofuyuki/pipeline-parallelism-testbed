@@ -143,7 +143,7 @@ class Shard1(nn.Module):
 
 
 class Shard2(nn.Module):
-    def __init__(self, ResBlock=Bottleneck, layer_list=[3, 4, 6, 3], num_classes=10):
+    def __init__(self, ResBlock=Bottleneck, layer_list=[3, 4, 6, 3]):
         super(Shard2, self).__init__()
         self._lock = threading.Lock()
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -184,7 +184,7 @@ class Shard2(nn.Module):
     
 class Shard3(nn.Module):
     def __init__(self, ResBlock=Bottleneck, layer_list=[3, 4, 6, 3], num_classes=10):
-        super(Shard2, self).__init__()
+        super(Shard3, self).__init__()
         self._lock = threading.Lock()
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
