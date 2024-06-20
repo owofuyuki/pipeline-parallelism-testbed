@@ -1,6 +1,8 @@
 # federated_client
 
+import os
 import time
+import argparse
 from collections import OrderedDict
 
 import flwr as fl
@@ -19,6 +21,31 @@ batch_size_train = 128
 batch_size_test = 100
 learning_rate = 0.001
 momentum = 0.01
+
+
+parser = argparse.ArgumentParser(
+    description="Federated Learning Flower based training")
+parser.add_argument(
+    "-b", "--server_addr",
+    type=str,
+    default="localhost",
+    help="""Address of master, will default to localhost if not provided.
+        Master must be able to accept network traffic on the address + port.""")
+parser.add_argument(
+    "-p", "--server_port",
+    type=str,
+    default="29500",
+    help="""Port that master is listening on, will default to 29500 if not
+        provided. Master must be able to accept network traffic on the host and port.""")
+parser.add_argument(
+    "-i", "--interface",
+    type=str,
+    default="eth0",
+    help="""Interface that current device is listening on. It will default to eth0 if 
+    not provided.""")
+
+args = parser.parse_args()
+
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -152,12 +179,12 @@ transform_test = transforms.Compose([
 trainset = torchvision.datasets.CIFAR10(
     root='./data', train=True, download=True, transform=transform_train)
 train_loader = torch.utils.data.DataLoader(
-    trainset, batch_size=batch_size_train, shuffle=True, num_workers=2)
+    trainset, batch_size=batch_size_train, shuffle=True)
 
 testset = torchvision.datasets.CIFAR10(
     root='./data', train=False, download=True, transform=transform_test)
 test_loader = torch.utils.data.DataLoader(
-    testset, batch_size=batch_size_test, shuffle=False, num_workers=2)
+    testset, batch_size=batch_size_test, shuffle=False)
 
 
 model = ResNet50(10).to(device)
@@ -168,16 +195,16 @@ num_examples = {"trainset" : len(trainset), "testset" : len(testset)}
 
 def train(epochs):
     model.train()
-    for (data, target) in tqdm(train_loader):
-        optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output, target)
-        loss.backward()
-        optimizer.step()
+    for _ in range(epochs):
+        for (data, target) in tqdm(train_loader):
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
         
         
 def test():
-    # evaluation mode
     model.eval()
     test_loss = 0
     correct = 0
@@ -196,6 +223,18 @@ def test():
     
     return test_loss, accuracy
     
+    # correct, total, loss = 0, 0, 0.0
+    # with torch.no_grad():
+    #     for data in test_loader:
+    #         images, labels = data[0].to(device), data[1].to(device)
+    #         outputs = model(images)
+    #         loss += criterion(outputs, labels).item()
+    #         _, predicted = torch.max(outputs.data, 1)
+    #         total += labels.size(0)
+    #         correct += (predicted == labels).sum().item()
+    # accuracy = correct / total
+    # return loss, accuracy
+    
 
 class Client(fl.client.NumPyClient):
     def get_parameters(self, config):
@@ -206,13 +245,9 @@ class Client(fl.client.NumPyClient):
         state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
         model.load_state_dict(state_dict, strict=True)
 
-    def run(self, parameters, config):
+    def fit(self, parameters, config):
         self.set_parameters(parameters)
-        for epoch in range(1, n_epochs + 1):
-            time_start = time.time()
-            train()
-            time_stop = time.time()
-            print(f"Epoch {epoch} training time: {time_stop - time_start} seconds\n")
+        train(epochs=n_epochs)
         return self.get_parameters(config={}), num_examples["trainset"], {}
 
     def evaluate(self, parameters, config):
@@ -221,5 +256,9 @@ class Client(fl.client.NumPyClient):
         return float(loss), num_examples["testset"], {"accuracy": float(accuracy)}
     
 
-
-fl.client.start_numpy_client(server_address="127.0.0.1:8080", client=Client())
+if __name__ == "__main__":
+    os.environ['SERVER_ADDR'] = args.server_addr
+    os.environ['SERVER_PORT'] = args.server_port
+    os.environ['GLOO_SOCKET_IFNAME'] = args.interface
+    os.environ["TP_SOCKET_IFNAME"] = args.interface
+    fl.client.start_numpy_client(server_address=f"{args.server_addr}:{args.server_port}", client=Client())
