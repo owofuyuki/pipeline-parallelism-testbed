@@ -1,29 +1,27 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+# federated_client
+
 import time
 from tqdm import tqdm
 
-import torchvision
-import torchvision.transforms as transforms
+from collections import OrderedDict
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
+import torchvision
+import torchvision.transforms as transforms
 
-if torch.cuda.is_available():
-    device = "cuda"
-    print(f"Using device: {torch.cuda.get_device_name(device)}")
-else:
-    device = "cpu"
-    print(f"Using device: CPU")
+import flwr as fl
 
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 n_epochs = 5
 batch_size_train = 128
 batch_size_test = 100
-learning_rate = 0.01
-momentum = 0.5
-log_interval = 10
-
+learning_rate = 0.001
+momentum = 0.01
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -135,10 +133,8 @@ class ResNet(nn.Module):
 def ResNet50(num_classes, channels=3):
     return ResNet(Bottleneck, [3, 4, 6, 3], num_classes, channels)
 
-
 def ResNet101(num_classes, channels=3):
     return ResNet(Bottleneck, [3, 4, 23, 3], num_classes, channels)
-
 
 def ResNet152(num_classes, channels=3):
     return ResNet(Bottleneck, [3, 8, 36, 3], num_classes, channels)
@@ -159,49 +155,75 @@ transform_test = transforms.Compose([
 trainset = torchvision.datasets.CIFAR10(
     root='./data', train=True, download=True, transform=transform_train)
 train_loader = torch.utils.data.DataLoader(
-    trainset, batch_size=128, shuffle=True, num_workers=2)
+    trainset, batch_size=batch_size_train, shuffle=True, num_workers=2)
 
 testset = torchvision.datasets.CIFAR10(
     root='./data', train=False, download=True, transform=transform_test)
 test_loader = torch.utils.data.DataLoader(
-    testset, batch_size=100, shuffle=False, num_workers=2)
+    testset, batch_size=batch_size_test, shuffle=False, num_workers=2)
 
 
 model = ResNet50(10).to(device)
 criterion = nn.CrossEntropyLoss()
-opt = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
+optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
+num_examples = {"trainset" : len(trainset), "testset" : len(testset)}
 
 
-def train(epoch):
+def train(epochs):
     model.train()
-    for (data, target) in tqdm(train_loader):
-        opt.zero_grad()
-        output = model(data)
-        loss = criterion(output, target)
-        loss.backward()
-        opt.step()
-
-
+    for _ in range(epochs):
+        for (data, target) in tqdm(train_loader):
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+        
+        
 def test():
     # evaluation mode
     model.eval()
     test_loss = 0
     correct = 0
-    for data, target in test_loader:
-        output = model(data)
-        test_loss += F.nll_loss(output, target, reduction='sum').item()
-        pred = output.data.max(1, keepdim=True)[1]  # get the index of the max log-probability
-        correct += pred.eq(target.data.view_as(pred)).long().cpu().sum()
+    with torch.no_grad():
+        for data, target in test_loader:
+            output = model(data)
+            test_loss += F.nll_loss(output, target, reduction='sum').item()
+            pred = output.data.max(1, keepdim=True)[1]  # get the index of the max log-probability
+            correct += pred.eq(target.data.view_as(pred)).long().cpu().sum()
 
     test_loss /= len(test_loader.dataset)
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+    print('\nTest set: Avg. loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
         test_loss, correct, len(test_loader.dataset),
         100.0 * correct / len(test_loader.dataset)))
+    accuracy = 100.0 * correct / len(test_loader.dataset)
+    
+    return test_loss, accuracy
+    
+
+class Client(fl.client.NumPyClient):
+    def get_parameters(self, config):
+        return [val.cpu().numpy() for _, val in model.state_dict().items()]
+
+    def set_parameters(self, parameters):
+        params_dict = zip(model.state_dict().keys(), parameters)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        model.load_state_dict(state_dict, strict=True)
+
+    def run(self, parameters, config):
+        self.set_parameters(parameters)
+        for epoch in range(1, n_epochs + 1):
+            time_start = time.time()
+            train()
+            time_stop = time.time()
+            print(f"Epoch {epoch} training time: {time_stop - time_start} seconds\n")
+        return self.get_parameters(config={}), num_examples["trainset"], {}
+
+    def evaluate(self, parameters, config):
+        self.set_parameters(parameters)
+        loss, accuracy = test()
+        return float(loss), num_examples["testset"], {"accuracy": float(accuracy)}
+    
 
 
-for epoch in range(1, n_epochs + 1):
-    time_start = time.time()
-    train(epoch)
-    time_stop = time.time()
-    print(f"Epoch {epoch} training time: {time_stop - time_start} seconds\n")
-    # test()
+fl.client.start_numpy_client(server_address="127.0.0.1:8080", client=Client())
