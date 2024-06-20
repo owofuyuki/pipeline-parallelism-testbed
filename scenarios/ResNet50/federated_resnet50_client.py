@@ -1,19 +1,16 @@
 # federated_client
 
 import time
-from tqdm import tqdm
-
 from collections import OrderedDict
 
+import flwr as fl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-
 import torchvision
 import torchvision.transforms as transforms
-
-import flwr as fl
+from tqdm import tqdm
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -171,13 +168,12 @@ num_examples = {"trainset" : len(trainset), "testset" : len(testset)}
 
 def train(epochs):
     model.train()
-    for _ in range(epochs):
-        for (data, target) in tqdm(train_loader):
-            optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
+    for (data, target) in tqdm(train_loader):
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
         
         
 def test():
