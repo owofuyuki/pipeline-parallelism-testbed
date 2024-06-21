@@ -16,15 +16,21 @@ from tqdm import tqdm
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-n_epochs = 5
+n_epochs = 1
 batch_size_train = 128
 batch_size_test = 100
 learning_rate = 0.001
 momentum = 0.01
+world_size = 8  # 1 server & n-1 clients
 
 
 parser = argparse.ArgumentParser(
     description="Federated Learning Flower based training")
+parser.add_argument(
+    "-c", "--cid",
+    type=int,
+    default=None,
+    help="Client id. Should be an integer between 0 and world_size - 1.")
 parser.add_argument(
     "-b", "--server_addr",
     type=str,
@@ -45,6 +51,7 @@ parser.add_argument(
     not provided.""")
 
 args = parser.parse_args()
+assert args.cid is not None, "Must provide client_id argument."
 
 
 class Bottleneck(nn.Module):
@@ -178,13 +185,23 @@ transform_test = transforms.Compose([
 
 trainset = torchvision.datasets.CIFAR10(
     root='./data', train=True, download=True, transform=transform_train)
-train_loader = torch.utils.data.DataLoader(
-    trainset, batch_size=batch_size_train, shuffle=True)
 
 testset = torchvision.datasets.CIFAR10(
     root='./data', train=False, download=True, transform=transform_test)
-test_loader = torch.utils.data.DataLoader(
-    testset, batch_size=batch_size_test, shuffle=False)
+
+# train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size_train, shuffle=True)
+
+# Split training set into n-1 partitions to simulate the individual dataset
+partition_size = len(trainset) // (world_size - 1)
+lengths = [partition_size] * (world_size - 1)
+datasets = torch.utils.data.random_split(trainset, lengths, torch.Generator().manual_seed(42))
+
+# Split each partition into train/val and create DataLoader
+train_loader = []
+for ds in datasets:
+    train_loader.append(torch.utils.data.DataLoader(ds, batch_size=batch_size_train, shuffle=True))
+
+test_loader = torch.utils.data.DataLoader(testset, batch_size=batch_size_test, shuffle=False)
 
 
 model = ResNet50(10).to(device)
@@ -193,16 +210,19 @@ optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=momentum)
 num_examples = {"trainset" : len(trainset), "testset" : len(testset)}
 
 
-def train(epochs):
+def train(i):
     model.train()
-    for _ in range(epochs):
-        for (data, target) in tqdm(train_loader):
+    for epoch in range(1, n_epochs + 1):
+        time_start = time.time()
+        for (data, target) in tqdm(train_loader[i]):
             optimizer.zero_grad()
             output = model(data)
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
-        
+            
+        time_stop = time.time()
+        print(f"Epoch {epoch} training time: {time_stop - time_start} seconds\n")   
         
 def test():
     model.eval()
@@ -247,7 +267,7 @@ class Client(fl.client.NumPyClient):
 
     def fit(self, parameters, config):
         self.set_parameters(parameters)
-        train(epochs=n_epochs)
+        train(i=args.cid)
         return self.get_parameters(config={}), num_examples["trainset"], {}
 
     def evaluate(self, parameters, config):

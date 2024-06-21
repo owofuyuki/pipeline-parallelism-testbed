@@ -1,7 +1,7 @@
 # federated_server
 
-import argparse
 import os
+import argparse
 
 import flwr as fl
 
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     os.environ["TP_SOCKET_IFNAME"] = args.interface
     fl.server.start_server(
         server_address=f"{args.server_addr}:{args.server_port}",
-        config=fl.server.ServerConfig(num_rounds=4),
+        config=fl.server.ServerConfig(num_rounds=40),
         strategy=fl.server.strategy.FedAvg(
             evaluate_metrics_aggregation_fn=weighted_average
         )
