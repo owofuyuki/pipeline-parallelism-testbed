@@ -21,7 +21,6 @@ batch_size_train = 128
 batch_size_test = 100
 learning_rate = 0.001
 momentum = 0.01
-world_size = 8  # 1 server & n-1 clients
 
 
 parser = argparse.ArgumentParser(
@@ -30,7 +29,7 @@ parser.add_argument(
     "-c", "--cid",
     type=int,
     default=None,
-    help="Client id. Should be an integer between 0 and world_size - 1.")
+    help="Client id. Should be an integer between 0 and n_client.")
 parser.add_argument(
     "-b", "--server_addr",
     type=str,
@@ -191,10 +190,19 @@ testset = torchvision.datasets.CIFAR10(
 
 # train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size_train, shuffle=True)
 
-# Split training set into n-1 partitions to simulate the individual dataset
-partition_size = len(trainset) // (world_size - 1)
-lengths = [partition_size] * (world_size - 1)
-datasets = torch.utils.data.random_split(trainset, lengths, torch.Generator().manual_seed(42))
+# Equally split training set into n-1 partitions to simulate the individual dataset
+partition_sizes = [16666, 16667, 16667]                              # 3 devices
+# partition_sizes = [12500, 12500, 12500, 12500]                     # 4 devices
+# partition_sizes = [8333, 8334, 8333, 8333, 8334, 8333]             # 6 devices
+# partition_sizes = [7142, 7143, 7143, 7143, 7143, 7143, 7143]       # 7 devices
+
+# Unevenly split training set into n-1 partitions to simulate the individual dataset
+# partition_sizes = [6149, 6149, 37702]                              # 3 devices
+# partition_sizes = [3935, 3935, 17998, 24132]                       # 4 devices
+# partition_sizes = [2521, 2521, 2521, 15456, 15456, 11525]          # 6 devices
+# partition_sizes = [2400, 2400, 2400, 2400, 14714, 14714, 10972]    # 7 devices
+
+datasets = torch.utils.data.random_split(trainset, partition_sizes, torch.Generator().manual_seed(42))
 
 # Split each partition into train/val and create DataLoader
 train_loader = []
