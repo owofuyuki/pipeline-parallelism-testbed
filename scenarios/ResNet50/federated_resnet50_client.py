@@ -1,8 +1,8 @@
 # federated_client
 
+import argparse
 import os
 import time
-import argparse
 from collections import OrderedDict
 
 import flwr as fl
@@ -289,4 +289,4 @@ if __name__ == "__main__":
     os.environ['SERVER_PORT'] = args.server_port
     os.environ['GLOO_SOCKET_IFNAME'] = args.interface
     os.environ["TP_SOCKET_IFNAME"] = args.interface
-    fl.client.start_numpy_client(server_address=f"{args.server_addr}:{args.server_port}", client=Client())
+    fl.client.start_client(server_address=f"{args.server_addr}:{args.server_port}", client=Client().to_client())

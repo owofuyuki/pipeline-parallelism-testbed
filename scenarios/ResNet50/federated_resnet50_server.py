@@ -1,10 +1,10 @@
 # federated_server
 
-import os
 import argparse
+import time
+import os
 
 import flwr as fl
-
 
 parser = argparse.ArgumentParser(
     description="Federated Learning Flower based training")
@@ -37,6 +37,23 @@ def weighted_average(metrics):
     return {"accuracy": sum(accuracies) / sum(examples)}
 
 
+class CustomFedAvg(fl.server.strategy.FedAvg):
+    def __init__(self, min_clients: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.min_clients = min_clients
+
+    def initialize_parameters(self, client_manager):
+        # Wait until the minimum number of clients is reached
+        print(f"Waiting for {self.min_clients} clients to connect...")
+        while True:
+            if len(client_manager.all()) >= self.min_clients:
+                print(f"{self.min_clients} clients have connected, starting training.")
+                break
+        return super().initialize_parameters(client_manager)
+
+
+num_clients = 3
+
 if __name__ == "__main__":
     os.environ['SERVER_ADDR'] = args.server_addr
     os.environ['SERVER_PORT'] = args.server_port
@@ -45,7 +62,11 @@ if __name__ == "__main__":
     fl.server.start_server(
         server_address=f"{args.server_addr}:{args.server_port}",
         config=fl.server.ServerConfig(num_rounds=40),
-        strategy=fl.server.strategy.FedAvg(
+        strategy=CustomFedAvg(
+            min_clients=num_clients,
+            min_fit_clients=num_clients,
+            min_evaluate_clients=num_clients,
+            min_available_clients=num_clients,
             evaluate_metrics_aggregation_fn=weighted_average
-        )
+        ),
     )
