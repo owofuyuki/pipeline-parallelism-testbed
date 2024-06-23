@@ -9,6 +9,11 @@ import flwr as fl
 parser = argparse.ArgumentParser(
     description="Federated Learning Flower based training")
 parser.add_argument(
+    "-n", "--numclients",
+    type=int,
+    default=2,
+    help="""Number of client devices that can participate in the FL system.""")
+parser.add_argument(
     "-b", "--server_addr",
     type=str,
     default="localhost",
@@ -51,9 +56,6 @@ class CustomFedAvg(fl.server.strategy.FedAvg):
                 break
         return super().initialize_parameters(client_manager)
 
-
-num_clients = 3
-
 if __name__ == "__main__":
     os.environ['SERVER_ADDR'] = args.server_addr
     os.environ['SERVER_PORT'] = args.server_port
@@ -63,10 +65,10 @@ if __name__ == "__main__":
         server_address=f"{args.server_addr}:{args.server_port}",
         config=fl.server.ServerConfig(num_rounds=40),
         strategy=CustomFedAvg(
-            min_clients=num_clients,
-            min_fit_clients=num_clients,
-            min_evaluate_clients=num_clients,
-            min_available_clients=num_clients,
+            min_clients=args.numclients,
+            min_fit_clients=args.numclients,
+            min_evaluate_clients=args.numclients,
+            min_available_clients=args.numclients,
             evaluate_metrics_aggregation_fn=weighted_average
         ),
     )

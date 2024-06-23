@@ -190,9 +190,9 @@ testset = torchvision.datasets.CIFAR10(
 
 # train_loader = torch.utils.data.DataLoader(trainset, batch_size=batch_size_train, shuffle=True)
 
-# Equally split training set into n-1 partitions to simulate the individual dataset
-partition_sizes = [16666, 16667, 16667]                              # 3 devices
-# partition_sizes = [12500, 12500, 12500, 12500]                     # 4 devices
+# Evenly split training set into n-1 partitions to simulate the individual dataset
+# partition_sizes = [16666, 16667, 16667]                            # 3 devices
+partition_sizes = [12500, 12500, 12500, 12500]                       # 4 devices
 # partition_sizes = [8333, 8334, 8333, 8333, 8334, 8333]             # 6 devices
 # partition_sizes = [7142, 7143, 7143, 7143, 7143, 7143, 7143]       # 7 devices
 
